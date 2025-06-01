@@ -56,8 +56,8 @@ serial_objs_lock = threading.Lock()
 # ----------------------
 # FPV Detection Constants & Functions
 # ----------------------
-FPV_RING_MAX_RADIUS = 3
-FPV_RING_MIN_RADIUS = 1500
+FPV_RING_MAX_RADIUS = 5
+FPV_RING_MIN_RADIUS = 150
 
 def is_fpv_detection(detection):
     """Check if detection is from FPV scanner"""
@@ -67,14 +67,19 @@ def is_fpv_detection(detection):
         detection.get('detection_type') == 'fpv_signal')
       
 def calculate_fpv_ring_radius(rssi_percent):
-    """Calculate FPV detection ring radius based on RSSI (3m at 100%, 1500m at 0%)"""
-    if rssi_percent <= 0:
-      return FPV_RING_MIN_RADIUS
-    if rssi_percent >= 100:
-      return FPV_RING_MAX_RADIUS
-    ratio = rssi_percent / 100.0
-    radius = FPV_RING_MIN_RADIUS - (ratio * (FPV_RING_MIN_RADIUS - FPV_RING_MAX_RADIUS))
-    return radius
+  """Calculate FPV detection ring radius based on RSSI with exponential curve"""
+  if rssi_percent <= 0:
+    return FPV_RING_MIN_RADIUS
+  if rssi_percent >= 100:
+    return FPV_RING_MAX_RADIUS
+
+  normalized = rssi_percent / 100.0
+  
+  # Exponential curve: stronger signals get much smaller radii
+  curve_factor = (1 - normalized) ** 2.5
+  radius = FPV_RING_MAX_RADIUS + (curve_factor * (FPV_RING_MIN_RADIUS - FPV_RING_MAX_RADIUS))
+  
+  return radius
 
 startup_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 # Updated detections CSV header to include faa_data.
@@ -1553,6 +1558,12 @@ HTML_PAGE = '''
       <span class="gear-icon">⚙️</span>
       <span>Settings</span>
     </div>
+    <div style="text-align: center; margin: 10px 0;">
+      <button id="clearInactiveBtn" onclick="clearInactiveDrones()" 
+              style="padding: 5px 10px; border: 1px solid #FF00FF; background: #333; color: #FF00FF; font-family: monospace; cursor: pointer; border-radius: 5px;">
+        Clear Inactive
+      </button>
+    </div>
     
     <!-- Settings modal dialog -->
     <div id="settingsModal">
@@ -1729,6 +1740,7 @@ document.addEventListener('DOMContentLoaded', () => {
     updateDataInterval = setInterval(updateData, interval);
   });
 
+
   // Staleout slider initialization
   const staleoutSlider = document.getElementById('staleoutSlider');
   const staleoutValue = document.getElementById('staleoutValue');
@@ -1848,6 +1860,23 @@ async function updateAliases() {
       // Persist detection state across page reloads
       localStorage.setItem("trackedPairs", JSON.stringify(window.tracked_pairs));
   } catch (error) { console.error("Error fetching aliases:", error); }
+}
+
+// Clear inactive
+function clearInactiveDrones() {
+  const currentTime = Date.now() / 1000;
+  const toRemove = [];
+  
+  persistentMACs.forEach(mac => {
+    const detection = tracked_pairs[mac];
+    const isActive = detection && ((currentTime - detection.last_update) <= STALE_THRESHOLD);
+    if (!isActive) {
+      toRemove.push(mac);
+    }
+  });
+  
+  toRemove.forEach(mac => removeDroneFromView(mac));
+  console.log(`Cleared ${toRemove.length} inactive drones`);
 }
 
 function safeSetView(latlng, zoom=18) {
@@ -2524,12 +2553,18 @@ function createFPVIcon(emoji, color, frequency) {
 }
 
 function calculateFPVRingRadius(rssi_percent) {
-  const FPV_RING_MAX_RADIUS = 3;
-  const FPV_RING_MIN_RADIUS = 1500;
+  const FPV_RING_MAX_RADIUS = 5;
+  const FPV_RING_MIN_RADIUS = 150;
+  
   if (rssi_percent <= 0) return FPV_RING_MIN_RADIUS;
   if (rssi_percent >= 100) return FPV_RING_MAX_RADIUS;
-  const ratio = rssi_percent / 100.0;
-  return FPV_RING_MIN_RADIUS - (ratio * (FPV_RING_MIN_RADIUS - FPV_RING_MAX_RADIUS));
+  
+  // Use exponential curve for more realistic distance relationship
+  const normalized = rssi_percent / 100.0;
+  const curve_factor = Math.pow(1 - normalized, 2.5);
+  const radius = FPV_RING_MAX_RADIUS + (curve_factor * (FPV_RING_MIN_RADIUS - FPV_RING_MAX_RADIUS));
+  
+  return radius;
 }
 
 function addFPVRing(mac, detection) {
@@ -2848,6 +2883,7 @@ async function updateData() {
       }
       const det = data[mac];
       if (!det.last_update || (currentTime - det.last_update > STALE_THRESHOLD)) {
+        // Remove from map but keep in tracking for inactive list
         if (droneMarkers[mac]) { map.removeLayer(droneMarkers[mac]); delete droneMarkers[mac]; }
         if (pilotMarkers[mac]) { map.removeLayer(pilotMarkers[mac]); delete pilotMarkers[mac]; }
         if (droneCircles[mac]) { map.removeLayer(droneCircles[mac]); delete droneCircles[mac]; }
@@ -2859,6 +2895,18 @@ async function updateData() {
         delete dronePathCoords[mac];
         delete pilotPathCoords[mac];
         previousActive[mac] = false;
+        
+        // Only completely remove if stale for much longer (like 10 minutes)
+        if (currentTime - det.last_update > (STALE_THRESHOLD * 10)) {
+          // Completely remove very old detections
+          delete tracked_pairs[mac];
+          const index = persistentMACs.indexOf(mac);
+          if (index > -1) persistentMACs.splice(index, 1);
+          if (comboListItems[mac]) {
+            comboListItems[mac].remove();
+            delete comboListItems[mac];
+          }
+        }
         continue;
       }
       const droneLat = det.drone_lat, droneLng = det.drone_long;
