@@ -53,6 +53,29 @@ last_mac_by_port = {}
 serial_objs = {}
 serial_objs_lock = threading.Lock()
 
+# ----------------------
+# FPV Detection Constants & Functions
+# ----------------------
+FPV_RING_MAX_RADIUS = 3
+FPV_RING_MIN_RADIUS = 1500
+
+def is_fpv_detection(detection):
+    """Check if detection is from FPV scanner"""
+    return (detection.get('fpv_detection', False) or 
+        detection.get('device_type') == 'fpv_scanner' or
+        'FPV-' in detection.get('basic_id', '') or
+        detection.get('detection_type') == 'fpv_signal')
+      
+def calculate_fpv_ring_radius(rssi_percent):
+    """Calculate FPV detection ring radius based on RSSI (3m at 100%, 1500m at 0%)"""
+    if rssi_percent <= 0:
+      return FPV_RING_MIN_RADIUS
+    if rssi_percent >= 100:
+      return FPV_RING_MAX_RADIUS
+    ratio = rssi_percent / 100.0
+    radius = FPV_RING_MIN_RADIUS - (ratio * (FPV_RING_MIN_RADIUS - FPV_RING_MAX_RADIUS))
+    return radius
+
 startup_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 # Updated detections CSV header to include faa_data.
 CSV_FILENAME = os.path.join(BASE_DIR, f"detections_{startup_timestamp}.csv")
@@ -155,38 +178,43 @@ def write_to_faa_cache(mac, remote_id, faa_data):
 # ----------------------
 def generate_kml():
     kml_lines = [
-        '<?xml version="1.0" encoding="UTF-8"?>',
-        '<kml xmlns="http://www.opengis.net/kml/2.2">',
-        '<Document>',
-        f'<name>Detections {startup_timestamp}</name>'
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<kml xmlns="http://www.opengis.net/kml/2.2">',
+      '<Document>',
+      f'<name>Detections {startup_timestamp}</name>'
     ]
     for mac, det in tracked_pairs.items():
-        alias = ALIASES.get(mac, '')
-        aliasStr = f"{alias} " if alias else ""
-        remoteIdStr = ""
-        if det.get("basic_id"):
-            remoteIdStr = " (RemoteID: " + det.get("basic_id") + ")"
-        if det.get("faa_data"):
-            remoteIdStr += " FAA: " + json.dumps(det.get("faa_data"))
-        # Drone placemark
-        kml_lines.append(f'<Placemark><name>Drone {aliasStr}{mac}{remoteIdStr}</name>')
-        kml_lines.append('<Style><IconStyle><scale>1.2</scale>'
-                         '<Icon><href>http://maps.google.com/mapfiles/kml/shapes/heliport.png</href></Icon>'
-                         '</IconStyle></Style>')
-        kml_lines.append(f'<Point><coordinates>{det.get("drone_long",0)},{det.get("drone_lat",0)},0</coordinates></Point>')
-        kml_lines.append('</Placemark>')
-        # Pilot placemark
-        kml_lines.append(f'<Placemark><name>Pilot {aliasStr}{mac}{remoteIdStr}</name>')
-        kml_lines.append('<Style><IconStyle><scale>1.2</scale>'
-                         '<Icon><href>http://maps.google.com/mapfiles/kml/shapes/man.png</href></Icon>'
-                         '</IconStyle></Style>')
+      alias = ALIASES.get(mac, '')
+      aliasStr = f"{alias} " if alias else ""
+      remoteIdStr = ""
+      if det.get("basic_id"):
+        remoteIdStr = " (RemoteID: " + det.get("basic_id") + ")"
+      if det.get("faa_data"):
+        remoteIdStr += " FAA: " + json.dumps(det.get("faa_data"))
+        
+      if is_fpv_detection(det):
+        fpv_info = f" FPV:{det.get('fpv_frequency', 'Unknown')}MHz {det.get('fpv_channel', '')}"
+        remoteIdStr += fpv_info
+        icon_emoji = "📡"
+        device_type = "Scanner"
+      else:
+        icon_emoji = "🛸"
+        device_type = "Drone"
+        
+      kml_lines.append(f'<Placemark><name>{icon_emoji} {device_type} {aliasStr}{mac}{remoteIdStr}</name>')
+      kml_lines.append('<Style><IconStyle><scale>1.2</scale></IconStyle></Style>')
+      kml_lines.append(f'<Point><coordinates>{det.get("drone_long",0)},{det.get("drone_lat",0)},0</coordinates></Point>')
+      kml_lines.append('</Placemark>')
+      
+      if not is_fpv_detection(det) and det.get("pilot_lat") and det.get("pilot_long"):
+        kml_lines.append(f'<Placemark><name>👤 Pilot {aliasStr}{mac}{remoteIdStr}</name>')
+        kml_lines.append('<Style><IconStyle><scale>1.2</scale></IconStyle></Style>')
         kml_lines.append(f'<Point><coordinates>{det.get("pilot_long",0)},{det.get("pilot_lat",0)},0</coordinates></Point>')
         kml_lines.append('</Placemark>')
     kml_lines.append('</Document></kml>')
     with open(KML_FILENAME, "w") as f:
-        f.write("\n".join(kml_lines))
+      f.write("\n".join(kml_lines))
     print("Updated KML file:", KML_FILENAME)
-
 
 # Generate initial KML so the file exists from startup
 generate_kml()
@@ -197,33 +225,40 @@ generate_kml()
 def append_to_cumulative_kml(mac, detection):
     alias = ALIASES.get(mac, '')
     aliasStr = f"{alias} " if alias else ""
-    # Build placemark for drone position
+    
+    if is_fpv_detection(detection):
+      icon_emoji = "📡"
+      device_type = "Scanner"
+      fpv_info = f" {detection.get('fpv_frequency', 'Unknown')}MHz"
+    else:
+      icon_emoji = "🛸"
+      device_type = "Drone"
+      fpv_info = ""
+      
     placemark = [
-        f"<Placemark><name>Drone {aliasStr}{mac} {datetime.now().isoformat()}</name>",
-        f"<Point><coordinates>{detection['drone_long']},{detection['drone_lat']},0</coordinates></Point>",
-        "</Placemark>"
+      f"<Placemark><name>{icon_emoji} {device_type} {aliasStr}{mac}{fpv_info} {datetime.now().isoformat()}</name>",
+      f"<Point><coordinates>{detection['drone_long']},{detection['drone_lat']},0</coordinates></Point>",
+      "</Placemark>"
     ]
-    # Insert before closing tags
     with open(CUMULATIVE_KML_FILENAME, "r+") as f:
+      content = f.read()
+      content = content.replace("</Document>\n</kml>", "")
+      f.seek(0)
+      f.write(content)
+      f.write("\n" + "\n".join(placemark) + "\n</Document>\n</kml>")
+      
+    if not is_fpv_detection(detection) and detection.get("pilot_lat") and detection.get("pilot_long"):
+      placemark = [
+        f"<Placemark><name>👤 Pilot {aliasStr}{mac} {datetime.now().isoformat()}</name>",
+        f"<Point><coordinates>{detection['pilot_long']},{detection['pilot_lat']},0</coordinates></Point>",
+        "</Placemark>"
+      ]
+      with open(CUMULATIVE_KML_FILENAME, "r+") as f:
         content = f.read()
-        # Strip closing tags
         content = content.replace("</Document>\n</kml>", "")
         f.seek(0)
         f.write(content)
         f.write("\n" + "\n".join(placemark) + "\n</Document>\n</kml>")
-    # Also add pilot position
-    if detection.get("pilot_lat") and detection.get("pilot_long"):
-        placemark = [
-            f"<Placemark><name>Pilot {aliasStr}{mac} {datetime.now().isoformat()}</name>",
-            f"<Point><coordinates>{detection['pilot_long']},{detection['pilot_lat']},0</coordinates></Point>",
-            "</Placemark>"
-        ]
-        with open(CUMULATIVE_KML_FILENAME, "r+") as f:
-            content = f.read()
-            content = content.replace("</Document>\n</kml>", "")
-            f.seek(0)
-            f.write(content)
-            f.write("\n" + "\n".join(placemark) + "\n</Document>\n</kml>")
 
 # ----------------------
 # Detection Update & CSV Logging
@@ -849,6 +884,34 @@ HTML_PAGE = '''
     }
     .leaflet-container {
       background-color: black !important;
+    }
+
+    /* FPV styling */
+    .drone-item.fpv-detection {
+      border-left: 3px solid #00FFFF !important;
+    }
+    
+    .drone-item.fpv-detection::after {
+      content: "📡";
+      margin-left: 5px;
+      color: #00FFFF;
+    }
+    
+    #activePlaceholder .drone-item.fpv-detection:hover::before {
+      content: "FPV Scanner ";
+      position: absolute;
+      bottom: 100%;
+      left: 50%;
+      transform: translateX(-50%);
+      background-color: black;
+      color: #00FFFF;
+      padding: 4px 6px;
+      border: 1px solid #00FFFF;
+      border-radius: 2px;
+      white-space: nowrap;
+      font-family: monospace;
+      font-size: 0.75em;
+      z-index: 2000;
     }
     /* Toggle switch styling */
     .switch { position: relative; display: inline-block; vertical-align: middle; width: 40px; height: 20px; }
@@ -1795,11 +1858,9 @@ function safeSetView(latlng, zoom=18) {
 
 // Transient terminal-style popup for drone events
 function showTerminalPopup(det, isNew) {
-  // Remove any existing popup
   const old = document.getElementById('dronePopup');
   if (old) old.remove();
 
-  // Build a new popup container
   const popup = document.createElement('div');
   popup.id = 'dronePopup';
   const isMobile = window.innerWidth <= 600;
@@ -1823,66 +1884,76 @@ function showTerminalPopup(det, isNew) {
     textAlign: 'center',
   });
 
-  // Build concise popup text
   const alias = aliases[det.mac];
-  const rid   = det.basic_id || 'N/A';
+  const rid = det.basic_id || 'N/A';
   let header;
-  if (!det.drone_lat || !det.drone_long || det.drone_lat === 0 || det.drone_long === 0) {
-    header = 'Drone with no GPS lock detected';
-  } else if (alias) {
-    header = `Known drone detected – ${alias}`;
+  
+  if (det.detection_type === 'fpv_signal' || det.fpv_detection) {
+    const freq = det.fpv_frequency || det.frequency_mhz || 'Unknown';
+    const channel = det.fpv_channel || det.channel || 'Unknown';
+    if (alias) {
+      header = `FPV Scanner detected – ${alias}`;
+    } else {
+      header = isNew ? 'New FPV Scanner detected' : 'FPV Scanner activity detected';
+    }
+    const content = `${header} - ${freq}MHz Ch:${channel} MAC:${det.mac}`;
+    popup.innerHTML = `<div>${content}</div>`;
   } else {
-    header = isNew ? 'New drone detected' : 'Previously seen non-aliased drone detected';
+    if (!det.drone_lat || !det.drone_long || det.drone_lat === 0 || det.drone_long === 0) {
+      header = 'Drone with no GPS lock detected';
+    } else if (alias) {
+      header = `Known drone detected – ${alias}`;
+    } else {
+      header = isNew ? 'New drone detected' : 'Previously seen non-aliased drone detected';
+    }
+    const content = alias
+      ? `${header} - RID:${rid} MAC:${det.mac}`
+      : `${header} - RID:${rid} MAC:${det.mac}`;
+    
+    const isMobileBtn = window.innerWidth <= 600;
+    const headerDiv = `<div>${content}</div>`;
+    let buttonDiv = '';
+    if (det.drone_lat && det.drone_long && det.drone_lat !== 0 && det.drone_long !== 0) {
+      const btnStyle = [
+        'display:block',
+        'width:100%',
+        'margin-top:4px',
+        'padding:' + (isMobileBtn ? '2px 0' : '4px 6px'),
+        'border:1px solid #FF00FF',
+        'border-radius:4px',
+        'background:transparent',
+        'color:lime',
+        'font-size:' + (isMobileBtn ? '0.8em' : '0.9em'),
+        'cursor:pointer'
+      ].join('; ');
+      buttonDiv = `<div><button id="zoomBtn" style="${btnStyle}">Zoom to Drone</button></div>`;
+    }
+    popup.innerHTML = headerDiv + buttonDiv;
+    if (buttonDiv) {
+      const zoomBtn = popup.querySelector('#zoomBtn');
+      zoomBtn.addEventListener('click', () => {
+        zoomBtn.style.backgroundColor = 'purple';
+        setTimeout(() => { zoomBtn.style.backgroundColor = 'transparent'; }, 200);
+        safeSetView([det.drone_lat, det.drone_long]);
+      });
+    }
   }
-  const content = alias
-    ? `${header} - RID:${rid} MAC:${det.mac}`
-    : `${header} - RID:${rid} MAC:${det.mac}`;
-  // Build popup HTML and button using new logic
-  // Build popup text
-  // (BEGIN PATCHED BUTTON & POPUP LOGIC)
-  // Build popup text
-  const isMobileBtn = window.innerWidth <= 600;
-  const headerDiv = `<div>${content}</div>`;
-  let buttonDiv = '';
-  if (det.drone_lat && det.drone_long && det.drone_lat !== 0 && det.drone_long !== 0) {
-    const btnStyle = [
-      'display:block',
-      'width:100%',
-      'margin-top:4px',
-      'padding:' + (isMobileBtn ? '2px 0' : '4px 6px'),
-      'border:1px solid #FF00FF',
-      'border-radius:4px',
-      'background:transparent',
-      'color:lime',
-      'font-size:' + (isMobileBtn ? '0.8em' : '0.9em'),
-      'cursor:pointer'
-    ].join('; ');
-    buttonDiv = `<div><button id="zoomBtn" style="${btnStyle}">Zoom to Drone</button></div>`;
-  }
-  popup.innerHTML = headerDiv + buttonDiv;
-  if (buttonDiv) {
-    const zoomBtn = popup.querySelector('#zoomBtn');
-    zoomBtn.addEventListener('click', () => {
-      zoomBtn.style.backgroundColor = 'purple';
-      setTimeout(() => { zoomBtn.style.backgroundColor = 'transparent'; }, 200);
-      safeSetView([det.drone_lat, det.drone_long]);
-    });
-  }
-  // (END PATCHED BUTTON & POPUP LOGIC)
 
-  // --- Webhook logic (scoped, non-intrusive) ---
   try {
     const webhookUrl = localStorage.getItem('popupWebhookUrl');
     if (webhookUrl && webhookUrl.startsWith("http")) {
       const alias = aliases[det.mac];
       let header;
-      if (!det.drone_lat || !det.drone_long || det.drone_lat === 0 || det.drone_long === 0) {
+      if (det.detection_type === 'fpv_signal' || det.fpv_detection) {
+        header = alias ? `FPV Scanner detected – ${alias}` : 'FPV Scanner detected';
+      } else if (!det.drone_lat || !det.drone_long || det.drone_lat === 0 || det.drone_long === 0) {
         header = 'Drone with no GPS lock detected';
       } else if (alias) {
         header = `Known drone detected – ${alias}`;
       } else {
         header = isNew ? 'New drone detected' : 'Previously seen non-aliased drone detected';
       }
+      
       const payload = {
         alert: header,
         mac: det.mac,
@@ -1892,9 +1963,12 @@ function showTerminalPopup(det, isNew) {
         drone_long: det.drone_long || null,
         pilot_lat: det.pilot_lat || null,
         pilot_long: det.pilot_long || null,
+        detection_type: det.detection_type || 'drone',
+        fpv_frequency: det.fpv_frequency || null,
+        fpv_channel: det.fpv_channel || null,
+        fpv_band: det.fpv_band || null,
         faa_data: (det.faa_data && det.faa_data.data && Array.isArray(det.faa_data.data.items) && det.faa_data.data.items.length > 0)
-          ? det.faa_data.data.items[0]
-          : null,
+          ? det.faa_data.data.items[0] : null,
         drone_gmap: det.drone_lat && det.drone_long ? `https://www.google.com/maps?q=${det.drone_lat},${det.drone_long}` : null,
         pilot_gmap: det.pilot_lat && det.pilot_long ? `https://www.google.com/maps?q=${det.pilot_lat},${det.pilot_long}` : null,
         isNew: isNew
@@ -1908,11 +1982,8 @@ function showTerminalPopup(det, isNew) {
   } catch (e) {
     console.warn('Webhook logic skipped due to error', e);
   }
-  // --- End webhook logic ---
 
   document.body.appendChild(popup);
-
-  // Auto-remove after 4 seconds
   setTimeout(() => popup.remove(), 4000);
 }
 
@@ -2398,10 +2469,12 @@ const pilotPolylines = {};
 const dronePathCoords = {};
 const pilotPathCoords = {};
 const droneBroadcastRings = {};
+const fpvRings = {};
 let historicalDrones = window.historicalDrones;
 let firstDetectionZoomed = false;
 
 let observerMarker = null;
+
 
 if (navigator.geolocation) {
   navigator.geolocation.watchPosition(function(position) {
@@ -2431,6 +2504,93 @@ function zoomToDrone(mac, detection) {
   ) {
     safeSetView([detection.drone_lat, detection.drone_long], 18);
   }
+}
+
+function createFPVIcon(emoji, color, frequency) {
+  const size = getDynamicSize();
+  const actualSize = Math.round(size);
+  const half = Math.round(actualSize / 2);
+  return L.divIcon({
+    html: `<div style="width:${actualSize}px; height:${actualSize}px; font-size:${actualSize}px; color:${color}; text-align:center; line-height:${actualSize}px; position:relative;">
+             ${emoji}
+             <div style="position:absolute; bottom:-2px; right:-2px; font-size:${Math.round(actualSize*0.3)}px; background:black; color:lime; padding:1px 2px; border-radius:2px; border:1px solid ${color};">
+               ${frequency}
+             </div>
+           </div>`,
+    className: '',
+    iconSize: [actualSize, actualSize],
+    iconAnchor: [half, half]
+  });
+}
+
+function calculateFPVRingRadius(rssi_percent) {
+  const FPV_RING_MAX_RADIUS = 3;
+  const FPV_RING_MIN_RADIUS = 1500;
+  if (rssi_percent <= 0) return FPV_RING_MIN_RADIUS;
+  if (rssi_percent >= 100) return FPV_RING_MAX_RADIUS;
+  const ratio = rssi_percent / 100.0;
+  return FPV_RING_MIN_RADIUS - (ratio * (FPV_RING_MIN_RADIUS - FPV_RING_MAX_RADIUS));
+}
+
+function addFPVRing(mac, detection) {
+  const lat = detection.drone_lat;
+  const lng = detection.drone_long;
+  const rssi = detection.rssi || 0;
+  const radius = detection.fpv_ring_radius || calculateFPVRingRadius(rssi);
+  const color = get_color_for_mac(mac);
+  
+  if (fpvRings[mac]) {
+    map.removeLayer(fpvRings[mac]);
+  }
+  
+  fpvRings[mac] = L.circle([lat, lng], {
+    radius: radius,
+    color: color,
+    fillColor: color,
+    fillOpacity: 0.1,
+    weight: 2,
+    dashArray: '10,5'
+  }).addTo(map);
+}
+
+function generateFPVPopupContent(detection) {
+  let content = '';
+  let aliasText = aliases[detection.mac] ? aliases[detection.mac] : "No Alias";
+  content += '<strong>FPV SIGNAL DETECTED</strong><br>';
+  content += '<strong>Scanner ID:</strong> <span style="color:#FF00FF;">' + aliasText + '</span><br>';
+  content += '<strong>MAC:</strong> ' + detection.mac + '<br>';
+  
+  if (detection.fpv_frequency || detection.frequency_mhz) {
+    content += '<div style="border:2px solid #00FFFF; padding:5px; margin:5px 0;">';
+    content += '<strong>Frequency:</strong> ' + (detection.fpv_frequency || detection.frequency_mhz) + ' MHz<br>';
+    content += '<strong>Channel:</strong> ' + (detection.fpv_channel || detection.channel || 'Unknown') + '<br>';
+    content += '<strong>Band:</strong> ' + (detection.fpv_band || detection.band || 'Unknown') + '<br>';
+    content += '</div>';
+  }
+  
+  content += '<strong>RSSI:</strong> ' + detection.rssi + '%<br>';
+  content += '<strong>Signal Strength:</strong> ' + (detection.signal_strength || 'Unknown') + '<br>';
+  
+  if (detection.fpv_ring_radius) {
+    content += '<strong>Detection Range:</strong> ' + Math.round(detection.fpv_ring_radius) + 'm<br>';
+  }
+  
+  content += '<strong>Last Update:</strong> ' + new Date(detection.last_update * 1000).toLocaleTimeString() + '<br>';
+  
+  if (detection.drone_lat && detection.drone_long) {
+    content += '<a target="_blank" href="https://www.google.com/maps/search/?api=1&query=' 
+             + detection.drone_lat + ',' + detection.drone_long + '">View Location on Google Maps</a><br>';
+  }
+  
+  content += `<hr style="border: 1px solid lime;">
+              <label for="aliasInput">Scanner Alias:</label>
+              <input type="text" id="aliasInput" onclick="event.stopPropagation();" 
+                     style="background-color: #222; color: #87CEEB; border: 1px solid #FF00FF;" 
+                     value="${aliases[detection.mac] ? aliases[detection.mac] : ''}"><br>
+              <button onclick="saveAlias('${detection.mac}')">Save Alias</button>
+              <button onclick="clearAlias('${detection.mac}')">Clear Alias</button>`;
+  
+  return content;
 }
 
 function showHistoricalDrone(mac, detection) {
@@ -2543,7 +2703,6 @@ function updateComboList(data) {
     let item = comboListItems[mac];
     if (!item) {
       item = document.createElement("div");
-      // Tooltip for drones without valid GPS
       const det = data[mac];
       const hasGps = det && det.drone_lat && det.drone_long && det.drone_lat !== 0 && det.drone_long !== 0;
       if (!hasGps) {
@@ -2552,6 +2711,11 @@ function updateComboList(data) {
       }
       comboListItems[mac] = item;
       item.className = "drone-item";
+      
+      if (det && (det.detection_type === 'fpv_signal' || det.fpv_detection)) {
+        item.classList.add('fpv-detection');
+      }
+      
       item.addEventListener("dblclick", () => {
          restorePaths();
          if (historicalDrones[mac]) {
@@ -2559,12 +2723,17 @@ function updateComboList(data) {
              localStorage.setItem('historicalDrones', JSON.stringify(historicalDrones));
              if (droneMarkers[mac]) { map.removeLayer(droneMarkers[mac]); delete droneMarkers[mac]; }
              if (pilotMarkers[mac]) { map.removeLayer(pilotMarkers[mac]); delete pilotMarkers[mac]; }
+             if (fpvRings[mac]) { map.removeLayer(fpvRings[mac]); delete fpvRings[mac]; }
              item.classList.remove("selected");
              map.closePopup();
          } else {
              historicalDrones[mac] = Object.assign({}, detection, { userLocked: true, lockTime: Date.now()/1000 });
              localStorage.setItem('historicalDrones', JSON.stringify(historicalDrones));
-             showHistoricalDrone(mac, historicalDrones[mac]);
+             if (detection.detection_type === 'fpv_signal' || detection.fpv_detection) {
+               showHistoricalFPV(mac, historicalDrones[mac]);
+             } else {
+               showHistoricalDrone(mac, historicalDrones[mac]);
+             }
              item.classList.add("selected");
              openAliasPopup(mac);
              if (detection && detection.drone_lat && detection.drone_long && detection.drone_lat != 0 && detection.drone_long != 0) {
@@ -2573,11 +2742,19 @@ function updateComboList(data) {
          }
       });
     }
-    item.textContent = aliases[mac] ? aliases[mac] : mac;
+    
+    let displayText = aliases[mac] ? aliases[mac] : mac;
+    if (detection && (detection.detection_type === 'fpv_signal' || detection.fpv_detection)) {
+      displayText += ' 📡';
+      if (detection.fpv_frequency) {
+        displayText += ` ${detection.fpv_frequency}MHz`;
+      }
+    }
+    item.textContent = displayText;
+    
     const color = get_color_for_mac(mac);
     item.style.borderColor = color;
     item.style.color = color;
-    // Mark items seen in the last 5 second
     const isRecent = detection && ((currentTime - detection.last_update) <= 5);
     item.classList.toggle('recent', isRecent);
     if (isActive) {
@@ -2586,6 +2763,45 @@ function updateComboList(data) {
       if (item.parentNode !== inactivePlaceholder) { inactivePlaceholder.appendChild(item); }
     }
   });
+}
+
+function showHistoricalFPV(mac, detection) {
+  if (detection.drone_lat === undefined || detection.drone_long === undefined || 
+      detection.drone_lat === 0 || detection.drone_long === 0) {
+    return;
+  }
+  const color = get_color_for_mac(mac);
+  const frequency = detection.fpv_frequency || detection.frequency_mhz || 0;
+  
+  if (!droneMarkers[mac]) {
+    droneMarkers[mac] = L.marker([detection.drone_lat, detection.drone_long], {
+      icon: createFPVIcon('📡', color, frequency),
+      pane: 'droneIconPane'
+    })
+    .bindPopup(generateFPVPopupContent(detection))
+    .addTo(map)
+    .on('click', function(){ map.setView(this.getLatLng(), map.getZoom()); });
+  } else {
+    droneMarkers[mac].setLatLng([detection.drone_lat, detection.drone_long]);
+    droneMarkers[mac].setPopupContent(generateFPVPopupContent(detection));
+  }
+  
+  if (!droneCircles[mac]) {
+    const zoomLevel = map.getZoom();
+    const size = Math.max(12, Math.min(zoomLevel * 1.5, 24));
+    droneCircles[mac] = L.circleMarker([detection.drone_lat, detection.drone_long], {
+      renderer: canvasRenderer,
+      pane: 'droneCirclePane',
+      radius: size * 0.45,
+      color: color,
+      fillColor: color,
+      fillOpacity: 0.7
+    }).addTo(map);
+  } else { 
+    droneCircles[mac].setLatLng([detection.drone_lat, detection.drone_long]); 
+  }
+  
+  addFPVRing(mac, detection);
 }
 
 // Only zoom on truly new detections—never on the initial restore
@@ -2611,9 +2827,15 @@ async function updateData() {
     const response = await fetch(window.location.origin + '/api/detections')
     const data = await response.json();
     window.tracked_pairs = data;
-    // Persist current detection data to localStorage so that markers & paths remain on reload.
     localStorage.setItem("trackedPairs", JSON.stringify(data));
     const currentTime = Date.now() / 1000;
+  // Add ALL MACs to persistentMACs (including FPV)
+    for (const mac in data) { 
+      if (!persistentMACs.includes(mac)) { 
+        persistentMACs.push(mac); 
+        console.log(`Added ${mac} to persistentMACs`); // Debug
+      } 
+    }
     for (const mac in data) { if (!persistentMACs.includes(mac)) { persistentMACs.push(mac); } }
     for (const mac in data) {
       if (historicalDrones[mac]) {
@@ -2621,6 +2843,7 @@ async function updateData() {
           delete historicalDrones[mac];
           localStorage.setItem('historicalDrones', JSON.stringify(historicalDrones));
           if (droneBroadcastRings[mac]) { map.removeLayer(droneBroadcastRings[mac]); delete droneBroadcastRings[mac]; }
+          if (fpvRings[mac]) { map.removeLayer(fpvRings[mac]); delete fpvRings[mac]; }
         } else { continue; }
       }
       const det = data[mac];
@@ -2632,158 +2855,181 @@ async function updateData() {
         if (dronePolylines[mac]) { map.removeLayer(dronePolylines[mac]); delete dronePolylines[mac]; }
         if (pilotPolylines[mac]) { map.removeLayer(pilotPolylines[mac]); delete pilotPolylines[mac]; }
         if (droneBroadcastRings[mac]) { map.removeLayer(droneBroadcastRings[mac]); delete droneBroadcastRings[mac]; }
+        if (fpvRings[mac]) { map.removeLayer(fpvRings[mac]); delete fpvRings[mac]; }
         delete dronePathCoords[mac];
         delete pilotPathCoords[mac];
-        // Mark as inactive to enable revival popups
         previousActive[mac] = false;
         continue;
       }
       const droneLat = det.drone_lat, droneLng = det.drone_long;
       const pilotLat = det.pilot_lat, pilotLng = det.pilot_long;
       const validDrone = (droneLat !== 0 && droneLng !== 0);
-      // State-change popup logic
-      const alias     = aliases[mac];
-      // New state calculation: consider time-based staleness
+      
+      const alias = aliases[mac];
       const activeNow = validDrone && det.last_update && (currentTime - det.last_update <= STALE_THRESHOLD);
       const wasActive = previousActive[mac] || false;
-      const isNew     = !seenDrones[mac];
+      const isNew = !seenDrones[mac];
 
-      // Only fire popup on transition from inactive to active, after initial load, and within stale threshold
       if (!initialLoad && det.last_update && (currentTime - det.last_update <= STALE_THRESHOLD) && !wasActive) {
         showTerminalPopup(det, alias ? false : !seenDrones[mac]);
         seenDrones[mac] = true;
       }
-      // Persist for next update
       previousActive[mac] = activeNow;
 
       const validPilot = (pilotLat !== 0 && pilotLng !== 0);
-      // Allow popups after initial load completes
       initialLoad = false;
       if (!validDrone && !validPilot) continue;
       const color = get_color_for_mac(mac);
-      // First detection zoom block (keep this block only)
+      
       if (!initialLoad && !firstDetectionZoomed && validDrone) {
         firstDetectionZoomed = true;
         safeSetView([droneLat, droneLng], 18);
       }
-      if (validDrone) {
-        if (droneMarkers[mac]) {
-          droneMarkers[mac].setLatLng([droneLat, droneLng]);
-          if (!droneMarkers[mac].isPopupOpen()) { droneMarkers[mac].setPopupContent(generatePopupContent(det, 'drone')); }
-        } else {
-          droneMarkers[mac] = L.marker([droneLat, droneLng], {
-            icon: createIcon('🛸', color),
-            pane: 'droneIconPane'
-          })
-                                .bindPopup(generatePopupContent(det, 'drone'))
-                                .addTo(map)
-                                // Remove automatic zoom on marker click:
-                                //.on('click', function(){ map.setView(this.getLatLng(), map.getZoom()); });
-                                ;
-        }
-        if (droneCircles[mac]) { droneCircles[mac].setLatLng([droneLat, droneLng]); }
-        else {
-          const zoomLevel = map.getZoom();
-          const size = Math.max(12, Math.min(zoomLevel * 1.5, 24));
-          droneCircles[mac] = L.circleMarker([droneLat, droneLng], {
-            pane: 'droneCirclePane',
-            radius: size * 0.45,
-            color: color,
-            fillColor: color,
-            fillOpacity: 0.7
-          }).addTo(map);
-        }
-        if (!dronePathCoords[mac]) { dronePathCoords[mac] = []; }
-        const lastDrone = dronePathCoords[mac][dronePathCoords[mac].length - 1];
-        if (!lastDrone || lastDrone[0] != droneLat || lastDrone[1] != droneLng) { dronePathCoords[mac].push([droneLat, droneLng]); }
-        if (dronePolylines[mac]) { map.removeLayer(dronePolylines[mac]); }
-        dronePolylines[mac] = L.polyline(dronePathCoords[mac], {color: color}).addTo(map);
-        if (currentTime - det.last_update <= 5) {
-          const dynamicRadius = getDynamicSize() * 0.45;
-          const ringWeight = 3 * 0.8;  // 20% thinner
-          const ringRadius = dynamicRadius + ringWeight / 2;  // sit just outside the main circle
-          if (droneBroadcastRings[mac]) {
-            droneBroadcastRings[mac].setLatLng([droneLat, droneLng]);
-            droneBroadcastRings[mac].setRadius(ringRadius);
-            droneBroadcastRings[mac].setStyle({ weight: ringWeight });
+      
+      if (det.detection_type === 'fpv_signal' || det.fpv_detection) {
+        const frequency = det.fpv_frequency || det.frequency_mhz || 0;
+        
+        if (validDrone) {
+          if (droneMarkers[mac]) {
+            droneMarkers[mac].setLatLng([droneLat, droneLng]);
+            droneMarkers[mac].setIcon(createFPVIcon('📡', color, frequency));
+            if (!droneMarkers[mac].isPopupOpen()) { 
+              droneMarkers[mac].setPopupContent(generateFPVPopupContent(det)); 
+            }
           } else {
-            droneBroadcastRings[mac] = L.circleMarker([droneLat, droneLng], {
+            droneMarkers[mac] = L.marker([droneLat, droneLng], {
+              icon: createFPVIcon('📡', color, frequency),
+              pane: 'droneIconPane'
+            })
+            .bindPopup(generateFPVPopupContent(det))
+            .addTo(map);
+          }
+          
+          if (droneCircles[mac]) { 
+            droneCircles[mac].setLatLng([droneLat, droneLng]); 
+          } else {
+            const zoomLevel = map.getZoom();
+            const size = Math.max(12, Math.min(zoomLevel * 1.5, 24));
+            droneCircles[mac] = L.circleMarker([droneLat, droneLng], {
               pane: 'droneCirclePane',
-              radius: ringRadius,
-              color: "lime",
-              fill: false,
-              weight: ringWeight
+              radius: size * 0.45,
+              color: color,
+              fillColor: color,
+              fillOpacity: 0.7
             }).addTo(map);
           }
-        } else {
-          if (droneBroadcastRings[mac]) {
-            map.removeLayer(droneBroadcastRings[mac]);
-            delete droneBroadcastRings[mac];
+          
+          addFPVRing(mac, det);
+          
+          if (followLock.enabled && followLock.type === 'drone' && followLock.id === mac) { 
+            map.setView([droneLat, droneLng], map.getZoom()); 
           }
         }
-        // Remove automatic follow-zoom (except for followLock, which is allowed)
-        // (auto-zoom disabled except for followLock)
-        if (followLock.enabled && followLock.type === 'drone' && followLock.id === mac) { map.setView([droneLat, droneLng], map.getZoom()); }
-      }
-      if (validPilot) {
-        if (pilotMarkers[mac]) {
-          pilotMarkers[mac].setLatLng([pilotLat, pilotLng]);
-          if (!pilotMarkers[mac].isPopupOpen()) { pilotMarkers[mac].setPopupContent(generatePopupContent(det, 'pilot')); }
-        } else {
-          pilotMarkers[mac] = L.marker([pilotLat, pilotLng], {
-            icon: createIcon('👤', color),
-            pane: 'pilotIconPane'
-          })
-                                .bindPopup(generatePopupContent(det, 'pilot'))
-                                .addTo(map)
-                                // Remove automatic zoom on marker click:
-                                //.on('click', function(){ map.setView(this.getLatLng(), map.getZoom()); });
-                                ;
+      } else {
+        if (validDrone) {
+          if (droneMarkers[mac]) {
+            droneMarkers[mac].setLatLng([droneLat, droneLng]);
+            if (!droneMarkers[mac].isPopupOpen()) { droneMarkers[mac].setPopupContent(generatePopupContent(det, 'drone')); }
+          } else {
+            droneMarkers[mac] = L.marker([droneLat, droneLng], {
+              icon: createIcon('🛸', color),
+              pane: 'droneIconPane'
+            })
+            .bindPopup(generatePopupContent(det, 'drone'))
+            .addTo(map);
+          }
+          if (droneCircles[mac]) { droneCircles[mac].setLatLng([droneLat, droneLng]); }
+          else {
+            const zoomLevel = map.getZoom();
+            const size = Math.max(12, Math.min(zoomLevel * 1.5, 24));
+            droneCircles[mac] = L.circleMarker([droneLat, droneLng], {
+              pane: 'droneCirclePane',
+              radius: size * 0.45,
+              color: color,
+              fillColor: color,
+              fillOpacity: 0.7
+            }).addTo(map);
+          }
+          if (!dronePathCoords[mac]) { dronePathCoords[mac] = []; }
+          const lastDrone = dronePathCoords[mac][dronePathCoords[mac].length - 1];
+          if (!lastDrone || lastDrone[0] != droneLat || lastDrone[1] != droneLng) { dronePathCoords[mac].push([droneLat, droneLng]); }
+          if (dronePolylines[mac]) { map.removeLayer(dronePolylines[mac]); }
+          dronePolylines[mac] = L.polyline(dronePathCoords[mac], {color: color}).addTo(map);
+          if (currentTime - det.last_update <= 5) {
+            const dynamicRadius = getDynamicSize() * 0.45;
+            const ringWeight = 3 * 0.8;
+            const ringRadius = dynamicRadius + ringWeight / 2;
+            if (droneBroadcastRings[mac]) {
+              droneBroadcastRings[mac].setLatLng([droneLat, droneLng]);
+              droneBroadcastRings[mac].setRadius(ringRadius);
+              droneBroadcastRings[mac].setStyle({ weight: ringWeight });
+            } else {
+              droneBroadcastRings[mac] = L.circleMarker([droneLat, droneLng], {
+                pane: 'droneCirclePane',
+                radius: ringRadius,
+                color: "lime",
+                fill: false,
+                weight: ringWeight
+              }).addTo(map);
+            }
+          } else {
+            if (droneBroadcastRings[mac]) {
+              map.removeLayer(droneBroadcastRings[mac]);
+              delete droneBroadcastRings[mac];
+            }
+          }
+          if (followLock.enabled && followLock.type === 'drone' && followLock.id === mac) { map.setView([droneLat, droneLng], map.getZoom()); }
         }
-        if (pilotCircles[mac]) { pilotCircles[mac].setLatLng([pilotLat, pilotLng]); }
-        else {
-          const zoomLevel = map.getZoom();
-          const size = Math.max(12, Math.min(zoomLevel * 1.5, 24));
-          pilotCircles[mac] = L.circleMarker([pilotLat, pilotLng], {
-            pane: 'pilotCirclePane',
-            radius: size * 0.34,
-            color: color,
-            fillColor: color,
-            fillOpacity: 0.7
-          }).addTo(map);
+        if (validPilot) {
+          if (pilotMarkers[mac]) {
+            pilotMarkers[mac].setLatLng([pilotLat, pilotLng]);
+            if (!pilotMarkers[mac].isPopupOpen()) { pilotMarkers[mac].setPopupContent(generatePopupContent(det, 'pilot')); }
+          } else {
+            pilotMarkers[mac] = L.marker([pilotLat, pilotLng], {
+              icon: createIcon('👤', color),
+              pane: 'pilotIconPane'
+            })
+            .bindPopup(generatePopupContent(det, 'pilot'))
+            .addTo(map);
+          }
+          if (pilotCircles[mac]) { pilotCircles[mac].setLatLng([pilotLat, pilotLng]); }
+          else {
+            const zoomLevel = map.getZoom();
+            const size = Math.max(12, Math.min(zoomLevel * 1.5, 24));
+            pilotCircles[mac] = L.circleMarker([pilotLat, pilotLng], {
+              pane: 'pilotCirclePane',
+              radius: size * 0.34,
+              color: color,
+              fillColor: color,
+              fillOpacity: 0.7
+            }).addTo(map);
+          }
+          if (!pilotPathCoords[mac]) { pilotPathCoords[mac] = []; }
+          const lastPilot = pilotPathCoords[mac][pilotPathCoords[mac].length - 1];
+          if (!lastPilot || lastPilot[0] != pilotLat || lastPilot[1] != pilotLng) { pilotPathCoords[mac].push([pilotLat, pilotLng]); }
+          if (pilotPolylines[mac]) { map.removeLayer(pilotPolylines[mac]); }
+          pilotPolylines[mac] = L.polyline(pilotPathCoords[mac], {color: color, dashArray: '5,5'}).addTo(map);
+          if (followLock.enabled && followLock.type === 'pilot' && followLock.id === mac) { map.setView([pilotLat, pilotLng], map.getZoom()); }
         }
-        if (!pilotPathCoords[mac]) { pilotPathCoords[mac] = []; }
-        const lastPilot = pilotPathCoords[mac][pilotPathCoords[mac].length - 1];
-        if (!lastPilot || lastPilot[0] != pilotLat || lastPilot[1] != pilotLng) { pilotPathCoords[mac].push([pilotLat, pilotLng]); }
-        if (pilotPolylines[mac]) { map.removeLayer(pilotPolylines[mac]); }
-        pilotPolylines[mac] = L.polyline(pilotPathCoords[mac], {color: color, dashArray: '5,5'}).addTo(map);
-        // Remove automatic follow-zoom (except for followLock, which is allowed)
-        // (auto-zoom disabled except for followLock)
-        if (followLock.enabled && followLock.type === 'pilot' && followLock.id === mac) { map.setView([pilotLat, pilotLng], map.getZoom()); }
       }
-      // At end of loop iteration, remember this state for next time
       previousActive[mac] = validDrone;
     }
     initialLoad = false;
     updateComboList(data);
     updateAliases();
-    // Mark that the first restore/update is done
     initialLoad = false;
 
-    // Handle no-GPS styling and alerts in the inactive list
     for (const mac in data) {
       const det = data[mac];
       const droneElem = comboListItems[mac];
       if (!droneElem) continue;
       if (!det.drone_lat || !det.drone_long || det.drone_lat === 0 || det.drone_long === 0) {
-        // Apply no-GPS styling and one-time alert
         droneElem.classList.add('no-gps');
         if (!alertedNoGpsDrones.has(det.mac)) {
           showTerminalPopup(det, true);
           alertedNoGpsDrones.add(det.mac);
         }
       } else {
-        // Remove no-GPS styling and reset alert state
         droneElem.classList.remove('no-gps');
         alertedNoGpsDrones.delete(det.mac);
       }
