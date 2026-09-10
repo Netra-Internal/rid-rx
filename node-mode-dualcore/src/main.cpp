@@ -132,7 +132,7 @@ void send_json_fast(const uav_data *UAV) {
            UAV->mac[3], UAV->mac[4], UAV->mac[5]);
   char json_msg[320];
   snprintf(json_msg, sizeof(json_msg),
-    "{\"type\":\"detection\",\"id\":\"%s\",\"lat\":%.6f,\"lon\":%.6f,\"alt_msl\":%d,\"pilot_lat\":%.6f,\"pilot_lon\":%.6f,\"mac\":\"%s\",\"rssi\":%d}",
+    R"({"type":"detection","id":"%s","lat":%.6f,"lon":%.6f,"alt_msl":%d,"pilot_lat":%.6f,"pilot_lon":%.6f,"mac":"%s","rssi":%d})",
     UAV->uav_id, UAV->lat_d, UAV->long_d, UAV->altitude_msl,
     UAV->base_lat_d, UAV->base_long_d, mac_str, UAV->rssi);
   Serial.println(json_msg);
