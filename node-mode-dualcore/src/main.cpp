@@ -49,6 +49,12 @@ unsigned long last_status = 0;
 void callback(void *, wifi_promiscuous_pkt_type_t);
 void send_json_fast(const uav_data *UAV);
 void print_compact_message(const uav_data *UAV);
+static bool id_nonempty(const char *s);
+static void copy_odid_text(char *dst, const char *src);
+static void format_mac(char *mac_str, const uint8_t *mac);
+static void copy_basic_id_from_uas(char *dst, const ODID_UAS_Data *uas);
+static void apply_uas_to_stored(uav_data *stored, const ODID_UAS_Data *uas,
+                                const uint8_t *mac, int rssi);
 
 // Get next available UAV slot or reuse existing one
 uav_data* next_uav(uint8_t* mac) {
@@ -61,6 +67,62 @@ uav_data* next_uav(uint8_t* mac) {
       return &uavs[i];
   }
   return &uavs[0]; // Fallback to first slot if all are used
+}
+
+static bool id_nonempty(const char *s) {
+  if (!s) return false;
+  while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
+  return *s != '\0';
+}
+
+static void copy_odid_text(char *dst, const char *src) {
+  strncpy(dst, src, ODID_ID_SIZE);
+  dst[ODID_ID_SIZE] = '\0';
+}
+
+static void format_mac(char *mac_str, const uint8_t *mac) {
+  snprintf(mac_str, 18, "%02x:%02x:%02x:%02x:%02x:%02x",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
+static void copy_basic_id_from_uas(char *dst, const ODID_UAS_Data *uas) {
+  dst[0] = '\0';
+  for (int i = 0; i < ODID_BASIC_ID_MAX_MESSAGES; i++) {
+    if (uas->BasicIDValid[i] && id_nonempty(uas->BasicID[i].UASID)) {
+      copy_odid_text(dst, uas->BasicID[i].UASID);
+      return;
+    }
+  }
+}
+
+static void apply_uas_to_stored(uav_data *stored, const ODID_UAS_Data *uas,
+                                const uint8_t *mac, int rssi) {
+  memcpy(stored->mac, mac, 6);
+  stored->rssi = rssi;
+  stored->last_seen = millis();
+
+  char incoming_id[ODID_ID_SIZE + 1];
+  copy_basic_id_from_uas(incoming_id, uas);
+  if (id_nonempty(incoming_id)) {
+    copy_odid_text(stored->uav_id, incoming_id);
+  }
+
+  if (uas->LocationValid) {
+    stored->lat_d = uas->Location.Latitude;
+    stored->long_d = uas->Location.Longitude;
+    stored->altitude_msl = (int)uas->Location.AltitudeGeo;
+    stored->height_agl = (int)uas->Location.Height;
+    stored->speed = (int)uas->Location.SpeedHorizontal;
+    stored->heading = (int)uas->Location.Direction;
+  }
+  if (uas->SystemValid) {
+    stored->base_lat_d = uas->System.OperatorLatitude;
+    stored->base_long_d = uas->System.OperatorLongitude;
+  }
+  if (uas->OperatorIDValid && id_nonempty(uas->OperatorID.OperatorId)) {
+    copy_odid_text(stored->op_id, uas->OperatorID.OperatorId);
+  }
+  stored->flag = 1;
 }
 
 // BLE Advertisement callback handler
@@ -85,7 +147,9 @@ public:
         case 0x00: {
           ODID_BasicID_data basic;
           decodeBasicIDMessage(&basic, (ODID_BasicID_encoded*) odid);
-          strncpy(UAV->uav_id, (char*) basic.UASID, ODID_ID_SIZE);
+          if (id_nonempty(basic.UASID)) {
+            copy_odid_text(UAV->uav_id, basic.UASID);
+          }
           break;
         }
         case 0x10: {
@@ -109,7 +173,9 @@ public:
         case 0x50: {
           ODID_OperatorID_data op;
           decodeOperatorIDMessage(&op, (ODID_OperatorID_encoded*) odid);
-          strncpy(UAV->op_id, (char*) op.OperatorId, ODID_ID_SIZE);
+          if (id_nonempty(op.OperatorId)) {
+            copy_odid_text(UAV->op_id, op.OperatorId);
+          }
           break;
         }
       }
@@ -126,14 +192,14 @@ void initializeSerial() {
 
 // USB Serial newline JSON for Netra pylon RidReader (same contract as remoteid-mesh-dualcore).
 void send_json_fast(const uav_data *UAV) {
+  if (UAV->lat_d == 0.0 && UAV->long_d == 0.0) return;
   char mac_str[18];
-  snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
-           UAV->mac[0], UAV->mac[1], UAV->mac[2],
-           UAV->mac[3], UAV->mac[4], UAV->mac[5]);
+  format_mac(mac_str, UAV->mac);
+  const char *id = id_nonempty(UAV->uav_id) ? UAV->uav_id : mac_str;
   char json_msg[320];
   snprintf(json_msg, sizeof(json_msg),
     R"({"type":"detection","id":"%s","lat":%.6f,"lon":%.6f,"alt_msl":%d,"pilot_lat":%.6f,"pilot_lon":%.6f,"mac":"%s","rssi":%d})",
-    UAV->uav_id, UAV->lat_d, UAV->long_d, UAV->altitude_msl,
+    id, UAV->lat_d, UAV->long_d, UAV->altitude_msl,
     UAV->base_lat_d, UAV->base_long_d, mac_str, UAV->rssi);
   Serial.println(json_msg);
 }
@@ -178,35 +244,11 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
   
   static const uint8_t nan_dest[6] = {0x51, 0x6f, 0x9a, 0x01, 0x00, 0x00};
   if (memcmp(nan_dest, &payload[4], 6) == 0) {
-    if (odid_wifi_receive_message_pack_nan_action_frame(&UAS_data, nullptr, payload, length) == 0) {
-      uav_data UAV;
-      memset(&UAV, 0, sizeof(UAV));
-      memcpy(UAV.mac, &payload[10], 6);
-      UAV.rssi = packet->rx_ctrl.rssi;
-      UAV.last_seen = millis();
-      
-      if (UAS_data.BasicIDValid[0]) {
-        strncpy(UAV.uav_id, (char *)UAS_data.BasicID[0].UASID, ODID_ID_SIZE);
-      }
-      if (UAS_data.LocationValid) {
-        UAV.lat_d = UAS_data.Location.Latitude;
-        UAV.long_d = UAS_data.Location.Longitude;
-        UAV.altitude_msl = (int)UAS_data.Location.AltitudeGeo;
-        UAV.height_agl = (int)UAS_data.Location.Height;
-        UAV.speed = (int)UAS_data.Location.SpeedHorizontal;
-        UAV.heading = (int)UAS_data.Location.Direction;
-      }
-      if (UAS_data.SystemValid) {
-        UAV.base_lat_d = UAS_data.System.OperatorLatitude;
-        UAV.base_long_d = UAS_data.System.OperatorLongitude;
-      }
-      if (UAS_data.OperatorIDValid) {
-        strncpy(UAV.op_id, (char *)UAS_data.OperatorID.OperatorId, ODID_ID_SIZE);
-      }
-      
-      uav_data* dbUAV = next_uav(UAV.mac);
-      memcpy(dbUAV, &UAV, sizeof(UAV));
-      dbUAV->flag = 1;
+    char nan_mac[6];
+    if (odid_wifi_receive_message_pack_nan_action_frame(&UAS_data, nan_mac, payload, length) == 0) {
+      uint8_t mac[6];
+      memcpy(mac, &payload[10], 6);
+      apply_uas_to_stored(next_uav(mac), &UAS_data, mac, packet->rx_ctrl.rssi);
     }
   }
   else if (payload[0] == 0x80) {
@@ -221,35 +263,9 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
         if (j < length) {
           memset(&UAS_data, 0, sizeof(UAS_data));
           odid_message_process_pack(&UAS_data, &payload[j], length - j);
-          
-          uav_data UAV;
-          memset(&UAV, 0, sizeof(UAV));
-          memcpy(UAV.mac, &payload[10], 6);
-          UAV.rssi = packet->rx_ctrl.rssi;
-          UAV.last_seen = millis();
-          
-          if (UAS_data.BasicIDValid[0]) {
-            strncpy(UAV.uav_id, (char *)UAS_data.BasicID[0].UASID, ODID_ID_SIZE);
-          }
-          if (UAS_data.LocationValid) {
-            UAV.lat_d = UAS_data.Location.Latitude;
-            UAV.long_d = UAS_data.Location.Longitude;
-            UAV.altitude_msl = (int)UAS_data.Location.AltitudeGeo;
-            UAV.height_agl = (int)UAS_data.Location.Height;
-            UAV.speed = (int)UAS_data.Location.SpeedHorizontal;
-            UAV.heading = (int)UAS_data.Location.Direction;
-          }
-          if (UAS_data.SystemValid) {
-            UAV.base_lat_d = UAS_data.System.OperatorLatitude;
-            UAV.base_long_d = UAS_data.System.OperatorLongitude;
-          }
-          if (UAS_data.OperatorIDValid) {
-            strncpy(UAV.op_id, (char *)UAS_data.OperatorID.OperatorId, ODID_ID_SIZE);
-          }
-          
-          uav_data* dbUAV = next_uav(UAV.mac);
-          memcpy(dbUAV, &UAV, sizeof(UAV));
-          dbUAV->flag = 1;
+          uint8_t mac[6];
+          memcpy(mac, &payload[10], 6);
+          apply_uas_to_stored(next_uav(mac), &UAS_data, mac, packet->rx_ctrl.rssi);
         }
       }
       offset += len + 2;

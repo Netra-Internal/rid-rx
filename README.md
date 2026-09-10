@@ -62,10 +62,10 @@ Netra pylon `RidReader` (`netra-pylon` `pylon/rid.py`) reads **USB serial at 115
 Each USB detection line is:
 
 ```json
-{"type":"detection","id":"<basic_id>","lat":0.0,"lon":0.0,"alt_msl":0,"pilot_lat":0.0,"pilot_lon":0.0,"mac":"aa:bb:cc:dd:ee:ff","rssi":-70}
+{"type":"detection","id":"<UASID-or-mac>","lat":32.881000,"lon":-117.234000,"alt_msl":120,"pilot_lat":32.880000,"pilot_lon":-117.235000,"mac":"aa:bb:cc:dd:ee:ff","rssi":-70}
 ```
 
-`id` is the OpenDroneID basic ID. `mac` / `rssi` are extra fields; RidReader ignores unknown keys. Status text (for example `[+] Device is active and scanning...`) is plain, not a fake detection.
+`id` is the OpenDroneID Basic ID (UASID from slot 0 or 1). If a Location/System pack arrives without Basic ID, the firmware **merges** into the MAC-keyed slot and keeps a previously cached UASID. If still empty, `id` falls back to the transmitter MAC so `validate_droneid` has a non-empty serial. Lines with `lat` and `lon` both `0` are not emitted. `mac` / `rssi` are extra fields; RidReader ignores unknown keys. Status text (for example `[+] Device is active and scanning...`) is plain, not a fake detection.
 
 `node-mode-dualcore` uses the same USB JSON contract. Its Serial1 mesh UART frames are unchanged (not RidReader). `remoteid-mesh` (C3 / WiFi-only) still emits the stock lukeswitz keys (`drone_lat`, `basic_id`, …) for Mesh-Mapper.
 
