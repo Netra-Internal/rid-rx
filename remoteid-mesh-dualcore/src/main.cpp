@@ -121,15 +121,17 @@ public:
 };
 
 void send_json_fast(const id_data *UAV) {
+  // Netra pylon RidReader (newline JSON): type, id, lat, lon, alt_msl, pilot_*.
+  // Extra mac/rssi fields are ignored by RidReader and must not replace required keys.
   char mac_str[18];
   snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
            UAV->mac[0], UAV->mac[1], UAV->mac[2],
            UAV->mac[3], UAV->mac[4], UAV->mac[5]);
-  char json_msg[256];
+  char json_msg[320];
   snprintf(json_msg, sizeof(json_msg),
-    "{\"mac\":\"%s\",\"rssi\":%d,\"drone_lat\":%.6f,\"drone_long\":%.6f,\"drone_altitude\":%d,\"pilot_lat\":%.6f,\"pilot_long\":%.6f,\"basic_id\":\"%s\"}",
-    mac_str, UAV->rssi, UAV->lat_d, UAV->long_d, UAV->altitude_msl,
-    UAV->base_lat_d, UAV->base_long_d, UAV->uav_id);
+    "{\"type\":\"detection\",\"id\":\"%s\",\"lat\":%.6f,\"lon\":%.6f,\"alt_msl\":%d,\"pilot_lat\":%.6f,\"pilot_lon\":%.6f,\"mac\":\"%s\",\"rssi\":%d}",
+    UAV->uav_id, UAV->lat_d, UAV->long_d, UAV->altitude_msl,
+    UAV->base_lat_d, UAV->base_long_d, mac_str, UAV->rssi);
   Serial.println(json_msg);
 }
 
