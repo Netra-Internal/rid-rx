@@ -4,9 +4,8 @@
 
 #include <Arduino.h>
 #include <HardwareSerial.h>
-#include <BLEDevice.h>
-#include <BLEUtils.h>
-#include <BLEScan.h>
+#include <NimBLEDevice.h>
+#include <vector>
 #include <WiFi.h>
 #include <esp_wifi.h>
 #include <esp_event.h>
@@ -47,10 +46,12 @@ static void copy_basic_id_from_uas(char *dst, const ODID_UAS_Data *uas);
 static void apply_uas_to_stored(id_data *stored, const ODID_UAS_Data *uas,
                                 const uint8_t *mac, int rssi);
 static void enqueue_if_located(id_data *stored);
+static void apply_ble_odid_msg(id_data *UAV, const uint8_t *odid);
+static void handle_ble_payload(const uint8_t *payload, int length,
+                               const uint8_t *mac, int rssi);
 
 #define MAX_UAVS 8
 id_data uavs[MAX_UAVS] = {0};
-BLEScan* pBLEScan = nullptr;
 ODID_UAS_Data UAS_data;
 unsigned long last_status = 0;
 
@@ -129,68 +130,112 @@ static void apply_uas_to_stored(id_data *stored, const ODID_UAS_Data *uas,
 static void enqueue_if_located(id_data *stored) {
   if (stored->lat_d == 0.0 && stored->long_d == 0.0) return;
   id_data tmp = *stored;
-  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-  xQueueSendFromISR(printQueue, &tmp, &xHigherPriorityTaskWoken);
-  if (xHigherPriorityTaskWoken) portYIELD_FROM_ISR();
+  // BLE + WiFi callbacks run in tasks, not an ISR. FromISR here starved the
+  // scheduler and is the wrong API for NimBLE host / WiFi RX tasks.
+  xQueueSend(printQueue, &tmp, 0);
 }
 
-class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
-public:
-  void onResult(BLEAdvertisedDevice device) override {
-    int len = device.getPayloadLength();
-    if (len <= 0) return;
-      
-    uint8_t* payload = device.getPayload();
-    if (len > 5 && payload[1] == 0x16 && payload[2] == 0xFA && 
-        payload[3] == 0xFF && payload[4] == 0x0D) {
-      uint8_t* mac = (uint8_t*) device.getAddress().getNative();
-      id_data* UAV = next_uav(mac);
-      UAV->last_seen = millis();
-      UAV->rssi = device.getRSSI();
-      memcpy(UAV->mac, mac, 6);
-      
-      uint8_t* odid = &payload[6];
-      switch (odid[0] & 0xF0) {
-        case 0x00: {
-          ODID_BasicID_data basic;
-          decodeBasicIDMessage(&basic, (ODID_BasicID_encoded*) odid);
-          if (id_nonempty(basic.UASID)) {
-            copy_odid_text(UAV->uav_id, basic.UASID);
-          }
-          break;
-        }
-        case 0x10: {
-          ODID_Location_data loc;
-          decodeLocationMessage(&loc, (ODID_Location_encoded*) odid);
-          UAV->lat_d = loc.Latitude;
-          UAV->long_d = loc.Longitude;
-          UAV->altitude_msl = (int) loc.AltitudeGeo;
-          UAV->height_agl = (int) loc.Height;
-          UAV->speed = (int) loc.SpeedHorizontal;
-          UAV->heading = (int) loc.Direction;
-          break;
-        }
-        case 0x40: {
-          ODID_System_data sys;
-          decodeSystemMessage(&sys, (ODID_System_encoded*) odid);
-          UAV->base_lat_d = sys.OperatorLatitude;
-          UAV->base_long_d = sys.OperatorLongitude;
-          break;
-        }
-        case 0x50: {
-          ODID_OperatorID_data op;
-          decodeOperatorIDMessage(&op, (ODID_OperatorID_encoded*) odid);
-          if (id_nonempty(op.OperatorId)) {
-            copy_odid_text(UAV->op_id, op.OperatorId);
-          }
-          break;
-        }
+static void apply_ble_odid_msg(id_data *UAV, const uint8_t *odid) {
+  switch (odid[0] & 0xF0) {
+    case 0x00: {
+      ODID_BasicID_data basic;
+      decodeBasicIDMessage(&basic, (ODID_BasicID_encoded *)odid);
+      if (id_nonempty(basic.UASID)) {
+        copy_odid_text(UAV->uav_id, basic.UASID);
       }
-      UAV->flag = 1;
-      enqueue_if_located(UAV);
+      break;
     }
+    case 0x10: {
+      ODID_Location_data loc;
+      decodeLocationMessage(&loc, (ODID_Location_encoded *)odid);
+      UAV->lat_d = loc.Latitude;
+      UAV->long_d = loc.Longitude;
+      UAV->altitude_msl = (int)loc.AltitudeGeo;
+      UAV->height_agl = (int)loc.Height;
+      UAV->speed = (int)loc.SpeedHorizontal;
+      UAV->heading = (int)loc.Direction;
+      break;
+    }
+    case 0x40: {
+      ODID_System_data sys;
+      decodeSystemMessage(&sys, (ODID_System_encoded *)odid);
+      UAV->base_lat_d = sys.OperatorLatitude;
+      UAV->base_long_d = sys.OperatorLongitude;
+      break;
+    }
+    case 0x50: {
+      ODID_OperatorID_data op;
+      decodeOperatorIDMessage(&op, (ODID_OperatorID_encoded *)odid);
+      if (id_nonempty(op.OperatorId)) {
+        copy_odid_text(UAV->op_id, op.OperatorId);
+      }
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+// ASTM Remote ID BLE: AD type 0x16, UUID 0xFFFA, app code 0x0D, then counter + 25-byte msg.
+// Walk every AD structure — Dronetag often prepends flags so the old payload[1]==0x16 check misses.
+static void handle_ble_payload(const uint8_t *payload, int length,
+                               const uint8_t *mac, int rssi) {
+  if (!payload || length <= 5 || !mac) return;
+  uint8_t mac_buf[6];
+  memcpy(mac_buf, mac, 6);
+  id_data *UAV = next_uav(mac_buf);
+  UAV->last_seen = millis();
+  UAV->rssi = rssi;
+  memcpy(UAV->mac, mac_buf, 6);
+
+  bool decoded = false;
+  int offset = 0;
+  while (offset + 5 < length) {
+    int ad_len = payload[offset];
+    if (ad_len < 1 || offset + 1 + ad_len > length) break;
+    if (payload[offset + 1] == 0x16 && ad_len >= 6 &&
+        payload[offset + 2] == 0xFA && payload[offset + 3] == 0xFF &&
+        payload[offset + 4] == 0x0D) {
+      const uint8_t *odid = &payload[offset + 6];
+      int odid_len = ad_len - 5;
+      if (odid_len >= 25 && (odid[0] & 0xF0) == 0xF0) {
+        memset(&UAS_data, 0, sizeof(UAS_data));
+        if (odid_message_process_pack(&UAS_data, (uint8_t *)odid, (size_t)odid_len) >= 0) {
+          apply_uas_to_stored(UAV, &UAS_data, mac_buf, rssi);
+          decoded = true;
+        }
+      } else if (odid_len >= 1) {
+        apply_ble_odid_msg(UAV, odid);
+        decoded = true;
+      }
+    }
+    offset += ad_len + 1;
+  }
+  if (decoded) {
+    UAV->flag = 1;
+    enqueue_if_located(UAV);
+  }
+}
+
+class RidBleScanCallbacks : public NimBLEScanCallbacks {
+public:
+  void onResult(const NimBLEAdvertisedDevice *advertisedDevice) override {
+    if (!advertisedDevice) return;
+    const std::vector<uint8_t> &payload = advertisedDevice->getPayload();
+    const uint8_t *mac = advertisedDevice->getAddress().getVal();
+    handle_ble_payload(payload.data(), (int)payload.size(), mac,
+                       advertisedDevice->getRSSI());
+  }
+
+  void onScanEnd(const NimBLEScanResults &results, int reason) override {
+    (void)results;
+    (void)reason;
+    NimBLEScan *scan = NimBLEDevice::getScan();
+    if (scan) scan->start(0, false, true);
   }
 };
+
+static RidBleScanCallbacks bleScanCallbacks;
 
 void send_json_fast(const id_data *UAV) {
   // Netra pylon RidReader (newline JSON): type, id, lat, lon, alt_msl, pilot_*.
@@ -248,15 +293,11 @@ void print_compact_message(const id_data *UAV) {
 
 void bleScanTask(void *parameter) {
   for (;;) {
-    BLEScanResults* foundDevices = pBLEScan->start(1, false);
-    pBLEScan->clearResults();
-    for (int i = 0; i < MAX_UAVS; i++) {
-      if (uavs[i].flag) {
-        // Removed send_json_fast and print_compact_message calls here
-        uavs[i].flag = 0;
-      }
+    NimBLEScan *scan = NimBLEDevice::getScan();
+    if (scan && !scan->isScanning()) {
+      scan->start(0, false, true);
     }
-    delay(100);
+    vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }
 
@@ -337,10 +378,18 @@ void setup() {
   esp_wifi_set_promiscuous_rx_cb(&callback);
   esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE);
   
-  BLEDevice::init("DroneID");
-  pBLEScan = BLEDevice::getScan();
-  pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
-  pBLEScan->setActiveScan(true);
+  // NimBLE: callback-only, no result store, passive, duplicates on.
+  // Bluedroid BLEAdvertisedDevice::parseAdvertisement malloc'd every ADV and
+  // OOMed (`Failed to alloc`) under a nearby Dronetag + WiFi promiscuous.
+  NimBLEDevice::init("");
+  NimBLEScan *scan = NimBLEDevice::getScan();
+  scan->setScanCallbacks(&bleScanCallbacks, true);
+  scan->setActiveScan(false);
+  scan->setInterval(96);
+  scan->setWindow(96);
+  scan->setMaxResults(0);
+  scan->setDuplicateFilter(false);
+  scan->start(0, false, true);
 
   printQueue = xQueueCreate(MAX_UAVS, sizeof(id_data));
   

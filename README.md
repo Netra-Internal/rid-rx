@@ -67,6 +67,8 @@ Each USB detection line is:
 
 `id` is the OpenDroneID Basic ID (UASID from slot 0 or 1). If a Location/System pack arrives without Basic ID, the firmware **merges** into the MAC-keyed slot and keeps a previously cached UASID. If still empty, `id` falls back to the transmitter MAC so `validate_droneid` has a non-empty serial. Lines with `lat` and `lon` both `0` are not emitted. `mac` / `rssi` are extra fields; RidReader ignores unknown keys. Status text (for example `[+] Device is active and scanning...`) is plain, not a fake detection.
 
+**BLE (Dronetag is BLE-only):** `remoteid-mesh-dualcore` / `node-mode-dualcore` scan with **NimBLE-Arduino**, not Bluedroid `BLEDevice`. Bluedroid `parseAdvertisement()` mallocs every advertisement and OOMs (`Failed to alloc`) next to WiFi promiscuous + a nearby beacon. NimBLE uses a callback-only passive scan (`setMaxResults(0)`, duplicates on, no result list) and walks AD structures for ASTM `0x16 / 0xFFFA / 0x0D`. Rebuild after `pio pkg update` so `h2zero/NimBLE-Arduino` is fetched.
+
 `node-mode-dualcore` uses the same USB JSON contract. Its Serial1 mesh UART frames are unchanged (not RidReader). `remoteid-mesh` (C3 / WiFi-only) still emits the stock lukeswitz keys (`drone_lat`, `basic_id`, …) for Mesh-Mapper.
 
 **Mac build + flash (PlatformIO):**
@@ -74,9 +76,11 @@ Each USB detection line is:
 ```bash
 brew install platformio
 cd remoteid-mesh-dualcore
+pio pkg update   # pulls NimBLE-Arduino
 pio run -e seeed_xiao_esp32s3
 # USB JTAG typically enumerates as /dev/cu.usbmodem* (vid:pid 303a:1001)
 pio run -e seeed_xiao_esp32s3 -t upload --upload-port /dev/cu.usbmodemXXXX
+# BLE-only Dronetag: USB should show type:detection JSON, not Failed to alloc
 ```
 
 Arduino CLI equivalent (XIAO ESP32-S3 core from espressif):
