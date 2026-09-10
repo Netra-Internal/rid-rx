@@ -3,6 +3,7 @@
 ## Table of Contents
 - [About](#about)
 - [Features](#features)
+- [Netra pylon / RidReader](#netra-pylon--ridreader)
 - [Headless Mode](#headless-mesh-mapper)
 - [How It Works](#how-it-works)
 - [How to Connect and Map](#how-to-connect-and-map)
@@ -43,6 +44,53 @@
 > MeshDetect kits use an esp32c3. Dual core firmware is for esp32s3 due to memory capacity restrictions.
 
 ---
+
+## Netra pylon / RidReader
+
+Netra pylon `RidReader` (`netra-pylon` `pylon/rid.py`) reads **USB serial at 115200 baud** and keeps only newline-delimited JSON objects with `"type":"detection"`. Non-JSON / non-detection lines are skipped.
+
+**Flash this for a pylon node (ESP32-S3 USB JTAG, e.g. Seeed XIAO / 303a:1001):**
+
+| Item | Value |
+|------|--------|
+| Source | `remoteid-mesh-dualcore` (WiFi + BT dual-core) |
+| PlatformIO env | `seeed_xiao_esp32s3` |
+| Stock prebuilt | `firmware/esp32s3-dual-rid.bin` (upstream lukeswitz schema — **not** RidReader) |
+| Rebuild output | `.pio/build/seeed_xiao_esp32s3/firmware.bin` — copy to `firmware/esp32s3-dual-rid-ridreader.bin` if you want a named artifact |
+| Baud | **115200** |
+
+Each USB detection line is:
+
+```json
+{"type":"detection","id":"<UASID-or-mac>","lat":32.881000,"lon":-117.234000,"alt_msl":120,"pilot_lat":32.880000,"pilot_lon":-117.235000,"mac":"aa:bb:cc:dd:ee:ff","rssi":-70}
+```
+
+`id` is the OpenDroneID Basic ID (UASID from slot 0 or 1). If a Location/System pack arrives without Basic ID, the firmware **merges** into the MAC-keyed slot and keeps a previously cached UASID. If still empty, `id` falls back to the transmitter MAC so `validate_droneid` has a non-empty serial. Lines with `lat` and `lon` both `0` are not emitted. `mac` / `rssi` are extra fields; RidReader ignores unknown keys. Status text (for example `[+] Device is active and scanning...`) is plain, not a fake detection.
+
+**BLE (Dronetag is BLE-only):** `remoteid-mesh-dualcore` / `node-mode-dualcore` scan with **NimBLE-Arduino**, not Bluedroid `BLEDevice`. Bluedroid `parseAdvertisement()` mallocs every advertisement and OOMs (`Failed to alloc`) next to WiFi promiscuous + a nearby beacon. NimBLE uses a callback-only passive scan (`setMaxResults(0)`, duplicates on, no result list) and walks AD structures for ASTM `0x16 / 0xFFFA / 0x0D`. Rebuild after `pio pkg update` so `h2zero/NimBLE-Arduino` is fetched.
+
+`node-mode-dualcore` uses the same USB JSON contract. Its Serial1 mesh UART frames are unchanged (not RidReader). `remoteid-mesh` (C3 / WiFi-only) still emits the stock lukeswitz keys (`drone_lat`, `basic_id`, …) for Mesh-Mapper.
+
+**Mac build + flash (PlatformIO):**
+
+```bash
+brew install platformio
+cd remoteid-mesh-dualcore
+pio pkg update   # pulls NimBLE-Arduino
+pio run -e seeed_xiao_esp32s3
+# USB JTAG typically enumerates as /dev/cu.usbmodem* (vid:pid 303a:1001)
+pio run -e seeed_xiao_esp32s3 -t upload --upload-port /dev/cu.usbmodemXXXX
+# BLE-only Dronetag: USB should show type:detection JSON, not Failed to alloc
+```
+
+Arduino CLI equivalent (XIAO ESP32-S3 core from espressif):
+
+```bash
+arduino-cli compile --fqbn esp32:esp32:XIAO_ESP32S3 remoteid-mesh-dualcore
+arduino-cli upload -p /dev/cu.usbmodemXXXX --fqbn esp32:esp32:XIAO_ESP32S3 remoteid-mesh-dualcore
+```
+
+Prefer PlatformIO: this tree is a PIO project (`src/` + vendored OpenDroneID `.c` files). After flashing, confirm USB JSON with `screen /dev/cu.usbmodemXXXX 115200` or pylon `RidReader`.
 
 # Headless Mesh Mapper
 
