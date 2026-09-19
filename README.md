@@ -62,10 +62,12 @@ Netra pylon `RidReader` (`netra-pylon` `pylon/rid.py`) reads **USB serial at 115
 Each USB detection line is:
 
 ```json
-{"type":"detection","id":"<UASID-or-mac>","lat":32.881000,"lon":-117.234000,"alt_msl":120,"pilot_lat":32.880000,"pilot_lon":-117.235000,"mac":"aa:bb:cc:dd:ee:ff","rssi":-70}
+{"type":"detection","id":"<UASID-or-mac>","lat":32.881000,"lon":-117.234000,"alt_hae_m":120.5,"pilot_lat":32.880000,"pilot_lon":-117.235000,"mac":"aa:bb:cc:dd:ee:ff","rssi":-70}
 ```
 
-`id` is the OpenDroneID Basic ID (UASID from slot 0 or 1). If a Location/System pack arrives without Basic ID, the firmware **merges** into the MAC-keyed slot and keeps a previously cached UASID. If still empty, `id` falls back to the transmitter MAC so `validate_droneid` has a non-empty serial. Lines with `lat` and `lon` both `0` are not emitted. `mac` / `rssi` are extra fields; RidReader ignores unknown keys. Status text (for example `[+] Device is active and scanning...`) is plain, not a fake detection.
+`id` is the OpenDroneID Basic ID (UASID from slot 0 or 1). If a Location/System pack arrives without Basic ID, the firmware **merges** into the MAC-keyed slot and keeps a previously cached UASID. If still empty, `id` falls back to the transmitter MAC so `validate_droneid` has a non-empty serial. A line is emitted only for a newly decoded Location report; Basic ID, System, and Operator ID messages update cached identity/operator fields without re-emitting a stale target position. Lines with `lat` and `lon` both `0` are not emitted.
+
+`alt_hae_m` is the Location report's decoded OpenDroneID geometric altitude in metres above the WGS84 ellipsoid (HAE), preserved to one decimal place. It is `null` when OpenDroneID reports its `-1000 m` unknown sentinel. It is not height above ground or mean sea level. Deploy the compatible netra-server contract first, then netra-pylon, before flashing this firmware. `mac` / `rssi` are extra fields; RidReader ignores unknown keys. Status text (for example `[+] Device is active and scanning...`) is plain, not a fake detection.
 
 **BLE (Dronetag is BLE-only):** `remoteid-mesh-dualcore` / `node-mode-dualcore` scan with **NimBLE-Arduino**, not Bluedroid `BLEDevice`. Bluedroid `parseAdvertisement()` mallocs every advertisement and OOMs (`Failed to alloc`) next to WiFi promiscuous + a nearby beacon. NimBLE uses a callback-only passive scan (`setMaxResults(0)`, duplicates on, no result list) and walks AD structures for ASTM `0x16 / 0xFFFA / 0x0D`. Rebuild after `pio pkg update` so `h2zero/NimBLE-Arduino` is fetched.
 
