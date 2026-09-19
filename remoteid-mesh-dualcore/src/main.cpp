@@ -12,6 +12,7 @@
 #include <nvs_flash.h>
 #include "opendroneid.h"
 #include "odid_wifi.h"
+#include "../../shared/rid_usb_format.h"
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -29,7 +30,7 @@ struct id_data {
   double   long_d;
   double   base_lat_d;
   double   base_long_d;
-  int      altitude_msl;
+  float    altitude_hae_m;
   int      height_agl;
   int      speed;
   int      heading;
@@ -43,10 +44,10 @@ static bool id_nonempty(const char *s);
 static void copy_odid_text(char *dst, const char *src);
 static void format_mac(char *mac_str, const uint8_t *mac);
 static void copy_basic_id_from_uas(char *dst, const ODID_UAS_Data *uas);
-static void apply_uas_to_stored(id_data *stored, const ODID_UAS_Data *uas,
+static bool apply_uas_to_stored(id_data *stored, const ODID_UAS_Data *uas,
                                 const uint8_t *mac, int rssi);
 static void enqueue_if_located(id_data *stored);
-static void apply_ble_odid_msg(id_data *UAV, const uint8_t *odid);
+static bool apply_ble_odid_msg(id_data *UAV, const uint8_t *odid);
 static void handle_ble_payload(const uint8_t *payload, int length,
                                const uint8_t *mac, int rssi);
 
@@ -97,12 +98,11 @@ static void copy_basic_id_from_uas(char *dst, const ODID_UAS_Data *uas) {
 
 // Merge one decoded pack into the MAC-keyed slot. Location-only packs must
 // not wipe a previously cached BasicID / OperatorID (RidReader rejects empty id).
-static void apply_uas_to_stored(id_data *stored, const ODID_UAS_Data *uas,
+static bool apply_uas_to_stored(id_data *stored, const ODID_UAS_Data *uas,
                                 const uint8_t *mac, int rssi) {
   memcpy(stored->mac, mac, 6);
   stored->rssi = rssi;
   stored->last_seen = millis();
-  stored->flag = 1;
 
   char incoming_id[ODID_ID_SIZE + 1];
   copy_basic_id_from_uas(incoming_id, uas);
@@ -113,7 +113,7 @@ static void apply_uas_to_stored(id_data *stored, const ODID_UAS_Data *uas,
   if (uas->LocationValid) {
     stored->lat_d = uas->Location.Latitude;
     stored->long_d = uas->Location.Longitude;
-    stored->altitude_msl = (int)uas->Location.AltitudeGeo;
+    stored->altitude_hae_m = uas->Location.AltitudeGeo;
     stored->height_agl = (int)uas->Location.Height;
     stored->speed = (int)uas->Location.SpeedHorizontal;
     stored->heading = (int)uas->Location.Direction;
@@ -125,6 +125,8 @@ static void apply_uas_to_stored(id_data *stored, const ODID_UAS_Data *uas,
   if (uas->OperatorIDValid && id_nonempty(uas->OperatorID.OperatorId)) {
     copy_odid_text(stored->op_id, uas->OperatorID.OperatorId);
   }
+  stored->flag = uas->LocationValid ? 1 : stored->flag;
+  return uas->LocationValid;
 }
 
 static void enqueue_if_located(id_data *stored) {
@@ -135,7 +137,7 @@ static void enqueue_if_located(id_data *stored) {
   xQueueSend(printQueue, &tmp, 0);
 }
 
-static void apply_ble_odid_msg(id_data *UAV, const uint8_t *odid) {
+static bool apply_ble_odid_msg(id_data *UAV, const uint8_t *odid) {
   switch (odid[0] & 0xF0) {
     case 0x00: {
       ODID_BasicID_data basic;
@@ -150,11 +152,11 @@ static void apply_ble_odid_msg(id_data *UAV, const uint8_t *odid) {
       decodeLocationMessage(&loc, (ODID_Location_encoded *)odid);
       UAV->lat_d = loc.Latitude;
       UAV->long_d = loc.Longitude;
-      UAV->altitude_msl = (int)loc.AltitudeGeo;
+      UAV->altitude_hae_m = loc.AltitudeGeo;
       UAV->height_agl = (int)loc.Height;
       UAV->speed = (int)loc.SpeedHorizontal;
       UAV->heading = (int)loc.Direction;
-      break;
+      return true;
     }
     case 0x40: {
       ODID_System_data sys;
@@ -174,6 +176,7 @@ static void apply_ble_odid_msg(id_data *UAV, const uint8_t *odid) {
     default:
       break;
   }
+  return false;
 }
 
 // ASTM Remote ID BLE: AD type 0x16, UUID 0xFFFA, app code 0x0D, then counter + 25-byte msg.
@@ -188,7 +191,7 @@ static void handle_ble_payload(const uint8_t *payload, int length,
   UAV->rssi = rssi;
   memcpy(UAV->mac, mac_buf, 6);
 
-  bool decoded = false;
+  bool fresh_location = false;
   int offset = 0;
   while (offset + 5 < length) {
     int ad_len = payload[offset];
@@ -201,17 +204,15 @@ static void handle_ble_payload(const uint8_t *payload, int length,
       if (odid_len >= 25 && (odid[0] & 0xF0) == 0xF0) {
         memset(&UAS_data, 0, sizeof(UAS_data));
         if (odid_message_process_pack(&UAS_data, (uint8_t *)odid, (size_t)odid_len) >= 0) {
-          apply_uas_to_stored(UAV, &UAS_data, mac_buf, rssi);
-          decoded = true;
+          fresh_location = apply_uas_to_stored(UAV, &UAS_data, mac_buf, rssi) || fresh_location;
         }
       } else if (odid_len >= 1) {
-        apply_ble_odid_msg(UAV, odid);
-        decoded = true;
+        fresh_location = apply_ble_odid_msg(UAV, odid) || fresh_location;
       }
     }
     offset += ad_len + 1;
   }
-  if (decoded) {
+  if (netra_rid_usb::should_emit(fresh_location, UAV->lat_d, UAV->long_d)) {
     UAV->flag = 1;
     enqueue_if_located(UAV);
   }
@@ -238,17 +239,16 @@ public:
 static RidBleScanCallbacks bleScanCallbacks;
 
 void send_json_fast(const id_data *UAV) {
-  // Netra pylon RidReader (newline JSON): type, id, lat, lon, alt_msl, pilot_*.
+  // Netra pylon RidReader (newline JSON): type, id, lat, lon, alt_hae_m, pilot_*.
   // Extra mac/rssi fields are ignored by RidReader and must not replace required keys.
   // validate_droneid rejects empty serial and lat==lon==0.
-  if (UAV->lat_d == 0.0 && UAV->long_d == 0.0) return;
+  if (!netra_rid_usb::usable_position(UAV->lat_d, UAV->long_d)) return;
   char mac_str[18];
   format_mac(mac_str, UAV->mac);
   const char *id = id_nonempty(UAV->uav_id) ? UAV->uav_id : mac_str;
   char json_msg[320];
-  snprintf(json_msg, sizeof(json_msg),
-    R"({"type":"detection","id":"%s","lat":%.6f,"lon":%.6f,"alt_msl":%d,"pilot_lat":%.6f,"pilot_lon":%.6f,"mac":"%s","rssi":%d})",
-    id, UAV->lat_d, UAV->long_d, UAV->altitude_msl,
+  netra_rid_usb::format_detection(
+    json_msg, sizeof(json_msg), id, UAV->lat_d, UAV->long_d, UAV->altitude_hae_m,
     UAV->base_lat_d, UAV->base_long_d, mac_str, UAV->rssi);
   Serial.println(json_msg);
 }
@@ -318,12 +318,13 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
   static const uint8_t nan_dest[6] = {0x51, 0x6f, 0x9a, 0x01, 0x00, 0x00};
   if (memcmp(nan_dest, &payload[4], 6) == 0) {
     char nan_mac[6];
+    memset(&UAS_data, 0, sizeof(UAS_data));
     if (odid_wifi_receive_message_pack_nan_action_frame(&UAS_data, nan_mac, payload, length) == 0) {
       uint8_t mac[6];
       memcpy(mac, &payload[10], 6);
       id_data *storedUAV = next_uav(mac);
-      apply_uas_to_stored(storedUAV, &UAS_data, mac, packet->rx_ctrl.rssi);
-      enqueue_if_located(storedUAV);
+      if (apply_uas_to_stored(storedUAV, &UAS_data, mac, packet->rx_ctrl.rssi))
+        enqueue_if_located(storedUAV);
     }
   }
   else if (payload[0] == 0x80) {
@@ -341,8 +342,8 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
           uint8_t mac[6];
           memcpy(mac, &payload[10], 6);
           id_data *storedUAV = next_uav(mac);
-          apply_uas_to_stored(storedUAV, &UAS_data, mac, packet->rx_ctrl.rssi);
-          enqueue_if_located(storedUAV);
+          if (apply_uas_to_stored(storedUAV, &UAS_data, mac, packet->rx_ctrl.rssi))
+            enqueue_if_located(storedUAV);
         }
       }
       offset += len + 2;
