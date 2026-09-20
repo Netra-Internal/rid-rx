@@ -15,6 +15,7 @@
 #include <esp_timer.h>
 #include <set>
 #include <string>
+#include <cmath>
 #include "opendroneid.h"
 #include "odid_wifi.h"
 
@@ -45,7 +46,8 @@ struct uav_data {
   int vertical_accuracy;
   int baro_accuracy;
   int speed_accuracy;
-  int timestamp;
+  float rid_timestamp_s;
+  float rid_timestamp_accuracy_s;
   int status;
   int height_type;
   int operator_location_type;
@@ -127,10 +129,20 @@ void send_json_detection(struct uav_data *UAV) {
   snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
            UAV->mac[0], UAV->mac[1], UAV->mac[2],
            UAV->mac[3], UAV->mac[4], UAV->mac[5]);
-  char json_msg[256];
+  char rid_timestamp[24];
+  char rid_timestamp_accuracy[24];
+  if (UAV->rid_timestamp_s == UAV->rid_timestamp_s &&
+      UAV->rid_timestamp_s >= 0.0f && UAV->rid_timestamp_s <= 3600.0f) {
+    snprintf(rid_timestamp, sizeof(rid_timestamp), "%.3f", (double)UAV->rid_timestamp_s);
+    snprintf(rid_timestamp_accuracy, sizeof(rid_timestamp_accuracy), "%.3f", (double)UAV->rid_timestamp_accuracy_s);
+  } else {
+    strcpy(rid_timestamp, "null");
+    strcpy(rid_timestamp_accuracy, "null");
+  }
+  char json_msg[384];
   snprintf(json_msg, sizeof(json_msg),
-    "{\"mac\":\"%s\", \"rssi\":%d, \"drone_lat\":%.6f, \"drone_long\":%.6f, \"drone_altitude\":%d, \"pilot_lat\":%.6f, \"pilot_long\":%.6f, \"basic_id\":\"%s\"}",
-    mac_str, UAV->rssi, UAV->lat_d, UAV->long_d, UAV->altitude_msl, UAV->base_lat_d, UAV->base_long_d, UAV->uav_id);
+    "{\"mac\":\"%s\", \"rssi\":%d, \"drone_lat\":%.6f, \"drone_long\":%.6f, \"drone_altitude\":%d, \"pilot_lat\":%.6f, \"pilot_long\":%.6f, \"basic_id\":\"%s\", \"rid_timestamp_s\":%s, \"rid_timestamp_accuracy_s\":%s}",
+    mac_str, UAV->rssi, UAV->lat_d, UAV->long_d, UAV->altitude_msl, UAV->base_lat_d, UAV->base_long_d, UAV->uav_id, rid_timestamp, rid_timestamp_accuracy);
   Serial.println(json_msg);
 }
 
@@ -140,10 +152,20 @@ void send_json_fast(struct uav_data *UAV) {
   snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
            UAV->mac[0], UAV->mac[1], UAV->mac[2],
            UAV->mac[3], UAV->mac[4], UAV->mac[5]);
-  char json_msg[256];
+  char rid_timestamp[24];
+  char rid_timestamp_accuracy[24];
+  if (UAV->rid_timestamp_s == UAV->rid_timestamp_s &&
+      UAV->rid_timestamp_s >= 0.0f && UAV->rid_timestamp_s <= 3600.0f) {
+    snprintf(rid_timestamp, sizeof(rid_timestamp), "%.3f", (double)UAV->rid_timestamp_s);
+    snprintf(rid_timestamp_accuracy, sizeof(rid_timestamp_accuracy), "%.3f", (double)UAV->rid_timestamp_accuracy_s);
+  } else {
+    strcpy(rid_timestamp, "null");
+    strcpy(rid_timestamp_accuracy, "null");
+  }
+  char json_msg[384];
   snprintf(json_msg, sizeof(json_msg),
-    "{\"mac\":\"%s\", \"rssi\":%d, \"drone_lat\":%.6f, \"drone_long\":%.6f, \"drone_altitude\":%d, \"pilot_lat\":%.6f, \"pilot_long\":%.6f, \"basic_id\":\"%s\"}",
-    mac_str, UAV->rssi, UAV->lat_d, UAV->long_d, UAV->altitude_msl, UAV->base_lat_d, UAV->base_long_d, UAV->uav_id);
+    "{\"mac\":\"%s\", \"rssi\":%d, \"drone_lat\":%.6f, \"drone_long\":%.6f, \"drone_altitude\":%d, \"pilot_lat\":%.6f, \"pilot_long\":%.6f, \"basic_id\":\"%s\", \"rid_timestamp_s\":%s, \"rid_timestamp_accuracy_s\":%s}",
+    mac_str, UAV->rssi, UAV->lat_d, UAV->long_d, UAV->altitude_msl, UAV->base_lat_d, UAV->base_long_d, UAV->uav_id, rid_timestamp, rid_timestamp_accuracy);
   Serial.println(json_msg);
 }
 
@@ -198,6 +220,8 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
   uav_data *currentUAV = (uav_data *)malloc(sizeof(uav_data));
   if (!currentUAV) return;
   memset(currentUAV, 0, sizeof(uav_data));
+  currentUAV->rid_timestamp_s = NAN;
+  currentUAV->rid_timestamp_accuracy_s = NAN;
   
   store_mac(currentUAV, payload);
   currentUAV->rssi = packet->rx_ctrl.rssi;
@@ -264,7 +288,8 @@ void parse_odid(uav_data *UAV, ODID_UAS_Data *UAS_data2) {
     UAV->vertical_accuracy = UAS_data2->Location.VertAccuracy;
     UAV->baro_accuracy = UAS_data2->Location.BaroAccuracy;
     UAV->speed_accuracy = UAS_data2->Location.SpeedAccuracy;
-    UAV->timestamp = (int)UAS_data2->Location.TimeStamp;
+    UAV->rid_timestamp_s = UAS_data2->Location.TimeStamp;
+    UAV->rid_timestamp_accuracy_s = decodeTimestampAccuracy(UAS_data2->Location.TSAccuracy);
     UAV->status = UAS_data2->Location.Status;
   }
   if (UAS_data2->SystemValid) {

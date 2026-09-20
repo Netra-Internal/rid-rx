@@ -35,6 +35,8 @@ struct id_data {
   int      speed;
   int      heading;
   int      flag;
+  float    rid_timestamp_s;
+  float    rid_timestamp_accuracy_s;
 };
 
 void callback(void *, wifi_promiscuous_pkt_type_t);
@@ -64,8 +66,11 @@ id_data* next_uav(uint8_t* mac) {
       return &uavs[i];
   }
   for (int i = 0; i < MAX_UAVS; i++) {
-    if (uavs[i].mac[0] == 0)
+    if (uavs[i].mac[0] == 0) {
+      uavs[i].rid_timestamp_s = NAN;
+      uavs[i].rid_timestamp_accuracy_s = NAN;
       return &uavs[i];
+    }
   }
   return &uavs[0];
 }
@@ -117,6 +122,8 @@ static bool apply_uas_to_stored(id_data *stored, const ODID_UAS_Data *uas,
     stored->height_agl = (int)uas->Location.Height;
     stored->speed = (int)uas->Location.SpeedHorizontal;
     stored->heading = (int)uas->Location.Direction;
+    stored->rid_timestamp_s = uas->Location.TimeStamp;
+    stored->rid_timestamp_accuracy_s = decodeTimestampAccuracy(uas->Location.TSAccuracy);
   }
   if (uas->SystemValid) {
     stored->base_lat_d = uas->System.OperatorLatitude;
@@ -156,6 +163,8 @@ static bool apply_ble_odid_msg(id_data *UAV, const uint8_t *odid) {
       UAV->height_agl = (int)loc.Height;
       UAV->speed = (int)loc.SpeedHorizontal;
       UAV->heading = (int)loc.Direction;
+      UAV->rid_timestamp_s = loc.TimeStamp;
+      UAV->rid_timestamp_accuracy_s = decodeTimestampAccuracy(loc.TSAccuracy);
       return true;
     }
     case 0x40: {
@@ -246,10 +255,11 @@ void send_json_fast(const id_data *UAV) {
   char mac_str[18];
   format_mac(mac_str, UAV->mac);
   const char *id = id_nonempty(UAV->uav_id) ? UAV->uav_id : mac_str;
-  char json_msg[320];
+  char json_msg[448];
   netra_rid_usb::format_detection(
     json_msg, sizeof(json_msg), id, UAV->lat_d, UAV->long_d, UAV->altitude_hae_m,
-    UAV->base_lat_d, UAV->base_long_d, mac_str, UAV->rssi);
+    UAV->base_lat_d, UAV->base_long_d, mac_str, UAV->rssi,
+    UAV->rid_timestamp_s, UAV->rid_timestamp_accuracy_s);
   Serial.println(json_msg);
 }
 

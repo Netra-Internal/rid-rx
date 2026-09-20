@@ -11,6 +11,14 @@ int main() {
   assert(length > 0);
   assert(std::strstr(json, "\"alt_hae_m\":112.5") != nullptr);
   assert(std::strstr(json, "alt_msl") == nullptr);
+  assert(std::strstr(json, "\"rid_timestamp_s\":null") != nullptr);
+  assert(std::strstr(json, "\"rid_timestamp_accuracy_s\":null") != nullptr);
+
+  netra_rid_usb::format_detection(
+      json, sizeof(json), "RID-1", 32.877, -117.235, 112.5f,
+      32.876, -117.236, "aa:bb:cc:dd:ee:ff", -62, 3599.75f, 0.5f);
+  assert(std::strstr(json, "\"rid_timestamp_s\":3599.750") != nullptr);
+  assert(std::strstr(json, "\"rid_timestamp_accuracy_s\":0.500") != nullptr);
 
   netra_rid_usb::format_detection(
       json, sizeof(json), "RID-1", 32.877, -117.235, 0.0f,

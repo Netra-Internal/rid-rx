@@ -143,6 +143,8 @@ Examples for different use cases:
        - `drone_lat`, `drone_long`, `drone_altitude`: Drone’s GPS data.
        - `pilot_lat`, `pilot_long`: Pilot’s location data.
        - `basic_id`: A unique identifier or Remote ID.
+       - `rid_timestamp_s`: the aircraft's Location timestamp, in seconds after the UTC hour.
+       - `rid_timestamp_accuracy_s`: the aircraft-reported timestamp accuracy in seconds.
    - **Data Transmission:**  
      - Sends the JSON payload over USB Serial to a computer running the Flask API.
      - Sends formatted messages via UART (mesh messages) to integrate with mesh networks.
