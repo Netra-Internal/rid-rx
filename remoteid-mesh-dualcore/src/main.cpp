@@ -66,8 +66,11 @@ id_data* next_uav(uint8_t* mac) {
       return &uavs[i];
   }
   for (int i = 0; i < MAX_UAVS; i++) {
-    if (uavs[i].mac[0] == 0)
+    if (uavs[i].mac[0] == 0) {
+      uavs[i].rid_timestamp_s = NAN;
+      uavs[i].rid_timestamp_accuracy_s = NAN;
       return &uavs[i];
+    }
   }
   return &uavs[0];
 }

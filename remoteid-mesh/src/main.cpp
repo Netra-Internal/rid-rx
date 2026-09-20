@@ -15,6 +15,7 @@
 #include <esp_timer.h>
 #include <set>
 #include <string>
+#include <cmath>
 #include "opendroneid.h"
 #include "odid_wifi.h"
 
@@ -219,6 +220,8 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
   uav_data *currentUAV = (uav_data *)malloc(sizeof(uav_data));
   if (!currentUAV) return;
   memset(currentUAV, 0, sizeof(uav_data));
+  currentUAV->rid_timestamp_s = NAN;
+  currentUAV->rid_timestamp_accuracy_s = NAN;
   
   store_mac(currentUAV, payload);
   currentUAV->rssi = packet->rx_ctrl.rssi;
